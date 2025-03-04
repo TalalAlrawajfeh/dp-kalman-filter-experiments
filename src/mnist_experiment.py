@@ -24,10 +24,10 @@ from jaxdpopt.dp_accounting_utils import calculate_noise
 
 USE_GPU = False
 
-OPTIMIZER = 'disk'
 
 flags.DEFINE_integer('eval_every_n_steps', 100, 'How often to run eval.')
 flags.DEFINE_string('experiment_name', '', 'Experiment name')
+flags.DEFINE_string('optimizer_name', 'disk', 'Name of the optimizer')
 flags.DEFINE_integer('rnd_seed', None,
                      'Initial random seed, if not specified then OS source of entropy will be used.')
 flags.DEFINE_integer('train_device_batch_size', 128, 'Per-device training batch size.')
@@ -62,7 +62,7 @@ def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
         mask = jax.lax.dynamic_slice(masks, (start_idx,), (physical_batch_size,))
 
         # compute grads and clip
-        if OPTIMIZER == 'disk':
+        if FLAGS.optimizer_name == 'disk':
             per_example_gradients1 = compute_per_example_look_ahead_gradients_physical_batch(state,
                                                                                              previous_params,
                                                                                              pb,
@@ -120,6 +120,8 @@ def main(argv):
         rnd_seed = int.from_bytes(os.urandom(8), 'big', signed=True)
     print('Initial random seed %d', rnd_seed)
 
+    # Some assertions on the flags
+    assert FLAGS.optimizer_name in ['disk', 'momentum'], f'Unknown optimizer name {FLAGS.optimizer_name}'
     if len(FLAGS.experiment_name) > 0:
         assert FLAGS.experiment_name in ['disk', 'momentum'], f'Unknown experiment name {FLAGS.experiment_name}'
 
@@ -271,9 +273,15 @@ def main(argv):
         ########################
 
         noisy_grad = add_Gaussian_noise(noise_rng, accumulated_clipped_grads, noise_std, clipping_norm)
-        if OPTIMIZER == 'disk':
-            noisy_grad = jax.tree_util.tree_map(lambda g1, g2: (1 - kappa) * g1 + kappa * g2, previous_noisy_grad,
-                                                noisy_grad)
+        if FLAGS.optimizer_name == 'disk':
+            noisy_grad = jax.tree_util.tree_map(
+                lambda g1, g2: (1 - kappa) * g1 + kappa * g2, previous_noisy_grad, noisy_grad)
+
+        # TODO: @talal, should the noisy_grad be normalized by the actual_batch_size?
+        if FLAGS.use_gpu:
+            actual_batch_size = jax.device_put(actual_batch_size, jax.devices("gpu")[0])
+        # noisy_grad = jax.tree_util.tree_map(lambda x: x / actual_batch_size, noisy_grad)
+        # accumulated_clipped_grads = jax.tree_util.tree_map(lambda x: x / actual_batch_size, accumulated_clipped_grads)
 
         # update
         state = jax.block_until_ready(update_model(state, noisy_grad))
