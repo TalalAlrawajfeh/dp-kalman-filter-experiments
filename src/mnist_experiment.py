@@ -1,7 +1,9 @@
 import math
+import os
 import time
 import warnings
 
+from absl import app, flags, logging
 from jaxdpopt.models import create_train_state
 from collections import namedtuple
 
@@ -19,10 +21,14 @@ from jaxdpopt.jax_mask_efficient import (
 )
 from jaxdpopt.dp_accounting_utils import calculate_noise
 
-USE_GPU = False
-
 OPTIMIZER = 'disk'
 
+flags.DEFINE_boolean('use_gpu', False, 'If true then use GPU')
+flags.DEFINE_integer('train_device_batch_size', 128, 'Per-device training batch size.')
+flags.DEFINE_integer('rnd_seed', None,
+                     'Initial random seed, if not specified then OS source of entropy will be used.')
+
+FLAGS = flags.FLAGS
 
 def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
     def process_physical_batch(t, params):
@@ -35,7 +41,7 @@ def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
             masks,
         ) = params
         # slice
-        physical_batch_size = 128
+        physical_batch_size = FLAGS.train_device_batch_size
         image_dimension = 28
         clipping_norm = 1
 
@@ -79,7 +85,17 @@ def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
     return jax.jit(process_physical_batch)
 
 
-def main():
+def main(argv):
+    del argv
+    print('JAX host: %d / %d' % (jax.process_index(), jax.process_count()))
+    print('JAX devices:\n%s' % '\n'.join(str(d) for d in jax.devices()), flush=True)
+    if FLAGS.rnd_seed is not None:
+        rnd_seed = FLAGS.rnd_seed
+    else:
+        rnd_seed = int.from_bytes(os.urandom(8), 'big', signed=True)
+    print('Initial random seed %d', rnd_seed)
+
+
     (train_images, train_labels), (test_images, test_labels) = keras.datasets.mnist.load_data()
     dataset_size = len(train_labels)
 
@@ -168,7 +184,7 @@ def main():
         padded_logical_batch_X = padded_logical_batch_X.reshape(-1, 1, image_dimension, image_dimension, 1)
 
         # cast to GPU
-        if USE_GPU:
+        if FLAGS.use_gpu:
             padded_logical_batch_X = jax.device_put(padded_logical_batch_X, jax.devices("gpu")[0])
             padded_logical_batch_y = jax.device_put(padded_logical_batch_y, jax.devices("gpu")[0])
             masks = jax.device_put(masks, jax.devices("gpu")[0])
@@ -212,7 +228,7 @@ def main():
 
         acc_iter = model_evaluation(
             state, test_images, test_labels, batch_size=num_classes, orig_image_dimension=image_dimension,
-            use_gpu=USE_GPU
+            use_gpu=FLAGS.use_gpu
         )
         print(f"accuracy at iteration {t}: {acc_iter}", flush=True)
 
@@ -232,4 +248,6 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    logging.set_verbosity(logging.ERROR)
+    jax.config.config_with_absl()
+    app.run(main)
