@@ -120,6 +120,10 @@ def main(argv):
         rnd_seed = int.from_bytes(os.urandom(8), 'big', signed=True)
     print('Initial random seed %d', rnd_seed)
 
+    if len(FLAGS.experiment_name) > 0:
+        assert FLAGS.experiment_name in ['disk', 'momentum'], f'Unknown experiment name {FLAGS.experiment_name}'
+
+
     (train_images, train_labels), (test_images, test_labels) = keras.datasets.cifar10.load_data()
     dataset_size = len(train_labels)
     train_images = train_images.reshape(-1, 32, 32, 3)
@@ -133,10 +137,10 @@ def main(argv):
     target_delta = 1e-6
     target_epsilon = 1.0
     num_steps = 10000
-    logical_bs = 128
+    logical_bs = FLAGS.train_device_batch_size
     num_classes = 10
     image_dimension = 32
-    physical_batch_size = 128
+    physical_batch_size = FLAGS.train_device_batch_size
     clipping_norm = 1.0
     accountant = 'pld'
     kappa = 0.7
@@ -182,8 +186,14 @@ def main(argv):
     previous_noisy_grad = jax.tree_util.tree_map(lambda x: x * 0, state.params)
 
     momentum_manual = None
+    variance_manual = None
     if FLAGS.experiment_name == 'momentum':
         momentum_manual = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+        variance_manual = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+
+    # Count and print the number of trainable parameters
+    num_trainable_params = sum(param.size for param in jax.tree_util.tree_leaves(state.params))
+    print(f"Number of trainable parameters: {num_trainable_params}")
 
     inner_product_test_batch_x = test_images[:128].reshape(-1, 1, 32, 32, 3)
     inner_product_test_batch_y = test_labels[:128]
@@ -265,8 +275,6 @@ def main(argv):
             noisy_grad = jax.tree_util.tree_map(lambda g1, g2: (1 - kappa) * g1 + kappa * g2, previous_noisy_grad,
                                                 noisy_grad)
 
-        if FLAGS.experiment_name == 'momentum':
-            momentum_manual = jax.tree_util.tree_map(lambda x, y: 0.9 * x + 0.1 * y, momentum_manual, noisy_grad)
         # update
         state = jax.block_until_ready(update_model(state, noisy_grad))
 
@@ -277,14 +285,13 @@ def main(argv):
         logical_batch_sizes.append(actual_batch_size)
 
         if t % FLAGS.eval_every_n_steps == 0:
-            print('current angle (in degrees): {}'.format(math.degrees(float(angle))))
-            print(f"throughput at iteration {t}: {actual_batch_size / duration}", flush=True)
+            print(f'\n current angle (in degrees): {float(math.degrees(float(angle))):8.3f}', flush=True)
 
             acc_iter = model_evaluation(
                 state, test_images, test_labels, batch_size=num_classes, orig_image_dimension=image_dimension,
                 use_gpu=FLAGS.use_gpu
             )
-            print(f"accuracy at iteration {t}: {acc_iter}", flush=True)
+            print(f"throughput at iteration {t:8}: {actual_batch_size / duration:.2f} samp/s, accuracy at iteration {t:8}: {100*acc_iter:5.2f}%", flush=True)
 
             # Compute privacy guarantees
             epsilon, delta = compute_epsilon(
@@ -296,6 +303,20 @@ def main(argv):
             )
             privacy_results = {"accountant": accountant, "epsilon": epsilon, "delta": delta}
             print(privacy_results, flush=True)
+
+            if FLAGS.experiment_name == 'momentum':
+                momentum_manual = jax.tree_util.tree_map(lambda x, y: 0.7 * x + 0.3 * y, momentum_manual, accumulated_clipped_grads)
+                variance_manual = jax.tree_util.tree_map(lambda x, y: 0.7 * x + 0.3 * jnp.square(y), variance_manual, accumulated_clipped_grads)
+                count = sum(jnp.sum(jnp.abs(param) > (0.5*jnp.sqrt(var)))
+                    for param, var in zip(jax.tree_util.tree_leaves(momentum_manual), jax.tree_util.tree_leaves(variance_manual)))
+                print(f"Number of parameters where the absolute mean is larger than the square root of the variance: {100 * count / num_trainable_params:.2f}%")
+
+                pred = jax.tree_util.tree_map(lambda x, y: x * (jnp.abs(x) > 0.5 * jnp.sqrt(y)), momentum_manual, variance_manual)
+
+                grad_norm = tree_norm(accumulated_clipped_grads)
+                diff_norm1 = tree_norm(jax.tree_util.tree_map(lambda x, y: x - y, accumulated_clipped_grads, momentum_manual))
+                diff_norm2 = tree_norm(jax.tree_util.tree_map(lambda x, y: x - y, accumulated_clipped_grads, pred))
+                print(f"grad_norm: {grad_norm:8.3f}, diff_norm1: {diff_norm1:8.3f}, diff_norm2: {diff_norm2:8.3f}", flush=True)
 
         previous_params = params
         previous_noisy_grad = noisy_grad
