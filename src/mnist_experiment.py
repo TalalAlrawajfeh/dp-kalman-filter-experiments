@@ -1,5 +1,4 @@
 import math
-import os
 import time
 import warnings
 
@@ -9,6 +8,10 @@ from collections import namedtuple
 
 import tensorflow as tf
 import jax
+import jax.numpy as jnp
+import tensorflow as tf
+
+from jaxdpopt.models import create_train_state
 
 keras = tf.keras
 
@@ -20,6 +23,8 @@ from jaxdpopt.jax_mask_efficient import (
     CrossEntropyLoss, compute_per_example_look_ahead_gradients_physical_batch
 )
 from jaxdpopt.dp_accounting_utils import calculate_noise
+
+USE_GPU = False
 
 OPTIMIZER = 'disk'
 
@@ -83,6 +88,24 @@ def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
         )
 
     return jax.jit(process_physical_batch)
+
+
+def tree_inner_product(tree1, tree2):
+    leaves1, _ = jax.tree_util.tree_flatten(tree1)
+    leaves2, _ = jax.tree_util.tree_flatten(tree2)
+    return sum(jnp.vdot(x, y) for x, y in zip(leaves1, leaves2))
+
+
+def tree_norm(tree):
+    return jnp.sqrt(tree_inner_product(tree, tree))  # ||x|| = sqrt(<x, x>)
+
+
+def tree_angle(tree1, tree2):
+    dot_product = tree_inner_product(tree1, tree2)
+    norm1 = tree_norm(tree1)
+    norm2 = tree_norm(tree2)
+    cos_theta = dot_product / (norm1 * norm2)
+    return jnp.arccos(jnp.clip(cos_theta, -1.0, 1.0))  # Clip for numerical stability
 
 
 def main(argv):
@@ -156,6 +179,9 @@ def main(argv):
     previous_params = jax.tree_util.tree_map(lambda x: x * 0, state.params)
     previous_noisy_grad = jax.tree_util.tree_map(lambda x: x * 0, state.params)
 
+    inner_product_test_batch_x = test_images[:128].reshape(-1, 1, 28, 28, 1)
+    inner_product_test_batch_y = test_labels[:128]
+
     for t in range(num_steps):
         sampling_rng = jax.random.key(t + 1)
         batch_rng, binomial_rng, noise_rng = jax.random.split(sampling_rng, 3)
@@ -211,6 +237,25 @@ def main(argv):
                 masks,
             )
         )
+
+        ########################
+
+        per_example_gradients1 = compute_per_example_look_ahead_gradients_physical_batch(state,
+                                                                                         previous_params,
+                                                                                         inner_product_test_batch_x,
+                                                                                         inner_product_test_batch_y,
+                                                                                         loss_fn,
+                                                                                         gamma)
+        per_example_gradients2 = compute_per_example_gradients_physical_batch(state,
+                                                                              inner_product_test_batch_x,
+                                                                              inner_product_test_batch_y,
+                                                                              loss_fn)
+
+        angle = tree_angle(per_example_gradients1, per_example_gradients2)
+
+        print('current angle: {}'.format(float(angle)))
+        ########################
+
         noisy_grad = add_Gaussian_noise(noise_rng, accumulated_clipped_grads, noise_std, clipping_norm)
         if OPTIMIZER == 'disk':
             noisy_grad = jax.tree_util.tree_map(lambda g1, g2: (1 - kappa) * g1 + kappa * g2, previous_noisy_grad,
