@@ -478,7 +478,7 @@ def test_body_fun(t, params, test_batch_size, orig_image_dimension, resizer_fn=N
     pb = jax.lax.dynamic_slice(
         test_X,
         (start_idx, 0, 0, 0),
-        (test_batch_size, orig_image_dimension, orig_image_dimension, 1),
+        (test_batch_size, orig_image_dimension, orig_image_dimension, 3),
     )
     yb = jax.lax.dynamic_slice(test_y, (start_idx,), (test_batch_size,))
 

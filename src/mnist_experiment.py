@@ -2,15 +2,12 @@ import math
 import os
 import time
 import warnings
-
-from absl import app, flags, logging
-from jaxdpopt.models import create_train_state
 from collections import namedtuple
 
-import tensorflow as tf
 import jax
 import jax.numpy as jnp
 import tensorflow as tf
+from absl import app, flags, logging
 
 from jaxdpopt.models import create_train_state
 
@@ -38,6 +35,7 @@ flags.DEFINE_boolean('use_gpu', False, 'If true then use GPU')
 
 FLAGS = flags.FLAGS
 
+
 def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
     def process_physical_batch(t, params):
         (
@@ -50,15 +48,16 @@ def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
         ) = params
         # slice
         physical_batch_size = FLAGS.train_device_batch_size
-        image_dimension = 28
+        image_dimension = 32
         clipping_norm = 1
 
         start_idx = t * physical_batch_size
         pb = jax.lax.dynamic_slice(
             logical_batch_X,
             (start_idx, 0, 0, 0, 0),
-            (physical_batch_size, 1, image_dimension, image_dimension, 1),
+            (physical_batch_size, 1, image_dimension, image_dimension, 3),
         )
+
         yb = jax.lax.dynamic_slice(logical_batch_y, (start_idx,), (physical_batch_size,))
         mask = jax.lax.dynamic_slice(masks, (start_idx,), (physical_batch_size,))
 
@@ -121,12 +120,12 @@ def main(argv):
         rnd_seed = int.from_bytes(os.urandom(8), 'big', signed=True)
     print('Initial random seed %d', rnd_seed)
 
-
-    (train_images, train_labels), (test_images, test_labels) = keras.datasets.mnist.load_data()
+    (train_images, train_labels), (test_images, test_labels) = keras.datasets.cifar10.load_data()
     dataset_size = len(train_labels)
-
-    train_images = train_images.reshape(-1, 28, 28, 1)
-    test_images = test_images.reshape(-1, 28, 28, 1)
+    train_images = train_images.reshape(-1, 32, 32, 3)
+    test_images = test_images.reshape(-1, 32, 32, 3)
+    train_labels = train_labels.flatten()
+    test_labels = test_labels.flatten()
 
     optimizer_config = namedtuple("Config", ["learning_rate"])
     optimizer_config.learning_rate = 1e-3
@@ -136,7 +135,7 @@ def main(argv):
     num_steps = 10000
     logical_bs = 128
     num_classes = 10
-    image_dimension = 28
+    image_dimension = 32
     physical_batch_size = 128
     clipping_norm = 1.0
     accountant = 'pld'
@@ -186,7 +185,7 @@ def main(argv):
     if FLAGS.experiment_name == 'momentum':
         momentum_manual = jax.tree_util.tree_map(lambda x: x * 0, state.params)
 
-    inner_product_test_batch_x = test_images[:128].reshape(-1, 1, 28, 28, 1)
+    inner_product_test_batch_x = test_images[:128].reshape(-1, 1, 32, 32, 3)
     inner_product_test_batch_y = test_labels[:128]
 
     for t in range(num_steps):
@@ -214,7 +213,7 @@ def main(argv):
             train_y=train_labels,
         )
 
-        padded_logical_batch_X = padded_logical_batch_X.reshape(-1, 1, image_dimension, image_dimension, 1)
+        padded_logical_batch_X = padded_logical_batch_X.reshape(-1, 1, image_dimension, image_dimension, 3)
 
         # cast to GPU
         if FLAGS.use_gpu:
@@ -278,7 +277,7 @@ def main(argv):
         logical_batch_sizes.append(actual_batch_size)
 
         if t % FLAGS.eval_every_n_steps == 0:
-            print('current angle: {}'.format(float(angle)))
+            print('current angle (in degrees): {}'.format(math.degrees(float(angle))))
             print(f"throughput at iteration {t}: {actual_batch_size / duration}", flush=True)
 
             acc_iter = model_evaluation(
