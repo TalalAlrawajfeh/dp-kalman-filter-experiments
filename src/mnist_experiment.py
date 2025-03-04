@@ -15,17 +15,20 @@ from jaxdpopt.jax_mask_efficient import (
     add_trees,
     clip_physical_batch,
     accumulate_physical_batch,
-    CrossEntropyLoss
+    CrossEntropyLoss, compute_per_example_look_ahead_gradients_physical_batch
 )
 from jaxdpopt.dp_accounting_utils import calculate_noise
 
 USE_GPU = False
 
+OPTIMIZER = 'disk'
 
-def process_physical_batch_factory(loss_fn):
+
+def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
     def process_physical_batch(t, params):
         (
             state,
+            previous_params,
             accumulated_clipped_grads,
             logical_batch_X,
             logical_batch_y,
@@ -46,7 +49,19 @@ def process_physical_batch_factory(loss_fn):
         mask = jax.lax.dynamic_slice(masks, (start_idx,), (physical_batch_size,))
 
         # compute grads and clip
-        per_example_gradients = compute_per_example_gradients_physical_batch(state, pb, yb, loss_fn)
+        if OPTIMIZER == 'disk':
+            per_example_gradients1 = compute_per_example_look_ahead_gradients_physical_batch(state,
+                                                                                             previous_params,
+                                                                                             pb,
+                                                                                             yb,
+                                                                                             loss_fn,
+                                                                                             gamma)
+            per_example_gradients2 = compute_per_example_gradients_physical_batch(state, pb, yb, loss_fn)
+            alpha = (1 - kappa) / (kappa * gamma)
+            per_example_gradients = jax.tree_util.tree_map(lambda g1, g2: alpha * g1 + (1 - alpha) * g2,
+                                                           per_example_gradients1, per_example_gradients2)
+        else:
+            per_example_gradients = compute_per_example_gradients_physical_batch(state, pb, yb, loss_fn)
 
         clipped_grads_from_pb = clip_physical_batch(per_example_gradients, clipping_norm)
         sum_of_clipped_grads_from_pb = accumulate_physical_batch(clipped_grads_from_pb, mask)
@@ -54,6 +69,7 @@ def process_physical_batch_factory(loss_fn):
 
         return (
             state,
+            previous_params,
             accumulated_clipped_grads,
             logical_batch_X,
             logical_batch_y,
@@ -82,6 +98,8 @@ def main():
     physical_batch_size = 128
     clipping_norm = 1.0
     accountant = 'pld'
+    kappa = 0.7
+    gamma = 0.2
 
     state = create_train_state(
         model_name="small",
@@ -117,7 +135,10 @@ def main():
     times = []
     logical_batch_sizes = []
 
-    process_physical_batch_fn = process_physical_batch_factory(loss_fn)
+    process_physical_batch_fn = process_physical_batch_factory(loss_fn, kappa, gamma)
+
+    previous_params = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+    previous_noisy_grad = jax.tree_util.tree_map(lambda x: x * 0, state.params)
 
     for t in range(num_steps):
         sampling_rng = jax.random.key(t + 1)
@@ -161,12 +182,13 @@ def main():
         start = time.time()
 
         # Main loop
-        _, accumulated_clipped_grads, *_ = jax.lax.fori_loop(
+        _, _, accumulated_clipped_grads, *_ = jax.lax.fori_loop(
             0,
             n_physical_batches,
             process_physical_batch_fn,
             (
                 state,
+                previous_params,
                 accumulated_clipped_grads0,
                 padded_logical_batch_X,
                 padded_logical_batch_y,
@@ -174,7 +196,9 @@ def main():
             )
         )
         noisy_grad = add_Gaussian_noise(noise_rng, accumulated_clipped_grads, noise_std, clipping_norm)
-
+        if OPTIMIZER == 'disk':
+            noisy_grad = jax.tree_util.tree_map(lambda g1, g2: (1 - kappa) * g1 + kappa * g2, previous_noisy_grad,
+                                                noisy_grad)
         # update
         state = jax.block_until_ready(update_model(state, noisy_grad))
 
@@ -202,6 +226,9 @@ def main():
         )
         privacy_results = {"accountant": accountant, "epsilon": epsilon, "delta": delta}
         print(privacy_results, flush=True)
+
+        previous_params = params
+        previous_noisy_grad = noisy_grad
 
 
 if __name__ == '__main__':

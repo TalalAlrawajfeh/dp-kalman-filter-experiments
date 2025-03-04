@@ -303,6 +303,46 @@ def compute_per_example_gradients_physical_batch(
     return px_grads
 
 
+@partial(jax.jit, static_argnames=('gamma', 'loss_fn'))
+def compute_per_example_look_ahead_gradients_physical_batch(
+        state: train_state.TrainState,
+        previous_params: jax.typing.ArrayLike,
+        batch_X: jax.typing.ArrayLike,
+        batch_y: jax.typing.ArrayLike,
+        loss_fn: LossFunction,
+        gamma: float,
+):
+    """Computes the per-example gradients for a physical batch.
+
+    Parameters
+    ----------
+    state : train_state.TrainState
+        The model train state.
+    batch_X : jax.typing.ArrayLike
+        The features of the physical batch.
+    batch_y : jax.typing.ArrayLike
+        The labels of the physical batch.
+    num_classes : int
+        The number of classes for one-hot encoding.
+    resizer_fn : function, optional
+        A function to resize the input data. If None, defaults to a lambda that returns x.
+
+    Returns
+    -------
+    px_grads : jax.typing.ArrayLike
+        The per-sample gradients of the physical batch.
+    """
+
+    if loss_fn is None:
+        raise ValueError("Loss function cannot be None")
+
+    look_ahead = jax.tree_util.tree_map(lambda p1, p2: p1 + gamma * (p1 - p2), state.params, previous_params)
+    grad_fn = lambda X, y: jax.grad(loss_fn)(look_ahead, X, y)
+    px_grads = jax.vmap(grad_fn, in_axes=(0, 0))(batch_X, batch_y)
+
+    return px_grads
+
+
 @jax.jit
 def clip_physical_batch(px_grads: jax.typing.ArrayLike, C: float):
     """Clip per-example gradients of a physical batch.
