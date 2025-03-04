@@ -1,4 +1,5 @@
 import math
+import os
 import time
 import warnings
 
@@ -28,10 +29,12 @@ USE_GPU = False
 
 OPTIMIZER = 'disk'
 
-flags.DEFINE_boolean('use_gpu', False, 'If true then use GPU')
-flags.DEFINE_integer('train_device_batch_size', 128, 'Per-device training batch size.')
+flags.DEFINE_integer('eval_every_n_steps', 100, 'How often to run eval.')
+flags.DEFINE_string('experiment_name', '', 'Experiment name')
 flags.DEFINE_integer('rnd_seed', None,
                      'Initial random seed, if not specified then OS source of entropy will be used.')
+flags.DEFINE_integer('train_device_batch_size', 128, 'Per-device training batch size.')
+flags.DEFINE_boolean('use_gpu', False, 'If true then use GPU')
 
 FLAGS = flags.FLAGS
 
@@ -130,7 +133,7 @@ def main(argv):
 
     target_delta = 1e-6
     target_epsilon = 1.0
-    num_steps = 1000
+    num_steps = 10000
     logical_bs = 128
     num_classes = 10
     image_dimension = 28
@@ -179,6 +182,10 @@ def main(argv):
     previous_params = jax.tree_util.tree_map(lambda x: x * 0, state.params)
     previous_noisy_grad = jax.tree_util.tree_map(lambda x: x * 0, state.params)
 
+    momentum_manual = None
+    if FLAGS.experiment_name == 'momentum':
+        momentum_manual = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+
     inner_product_test_batch_x = test_images[:128].reshape(-1, 1, 28, 28, 1)
     inner_product_test_batch_y = test_labels[:128]
 
@@ -215,7 +222,6 @@ def main(argv):
             padded_logical_batch_y = jax.device_put(padded_logical_batch_y, jax.devices("gpu")[0])
             masks = jax.device_put(masks, jax.devices("gpu")[0])
 
-        print("##### Starting gradient accumulation #####", flush=True)
         ### gradient accumulation
         params = state.params
 
@@ -253,13 +259,15 @@ def main(argv):
 
         angle = tree_angle(per_example_gradients1, per_example_gradients2)
 
-        print('current angle: {}'.format(float(angle)))
         ########################
 
         noisy_grad = add_Gaussian_noise(noise_rng, accumulated_clipped_grads, noise_std, clipping_norm)
         if OPTIMIZER == 'disk':
             noisy_grad = jax.tree_util.tree_map(lambda g1, g2: (1 - kappa) * g1 + kappa * g2, previous_noisy_grad,
                                                 noisy_grad)
+
+        if FLAGS.experiment_name == 'momentum':
+            momentum_manual = jax.tree_util.tree_map(lambda x, y: 0.9 * x + 0.1 * y, momentum_manual, noisy_grad)
         # update
         state = jax.block_until_ready(update_model(state, noisy_grad))
 
@@ -269,24 +277,26 @@ def main(argv):
         times.append(duration)
         logical_batch_sizes.append(actual_batch_size)
 
-        print(f"throughput at iteration {t}: {actual_batch_size / duration}", flush=True)
+        if t % FLAGS.eval_every_n_steps == 0:
+            print('current angle: {}'.format(float(angle)))
+            print(f"throughput at iteration {t}: {actual_batch_size / duration}", flush=True)
 
-        acc_iter = model_evaluation(
-            state, test_images, test_labels, batch_size=num_classes, orig_image_dimension=image_dimension,
-            use_gpu=FLAGS.use_gpu
-        )
-        print(f"accuracy at iteration {t}: {acc_iter}", flush=True)
+            acc_iter = model_evaluation(
+                state, test_images, test_labels, batch_size=num_classes, orig_image_dimension=image_dimension,
+                use_gpu=FLAGS.use_gpu
+            )
+            print(f"accuracy at iteration {t}: {acc_iter}", flush=True)
 
-        # Compute privacy guarantees
-        epsilon, delta = compute_epsilon(
-            noise_multiplier=noise_std,
-            sample_rate=subsampling_ratio,
-            steps=t + 1,
-            target_delta=target_delta,
-            accountant=accountant,
-        )
-        privacy_results = {"accountant": accountant, "epsilon": epsilon, "delta": delta}
-        print(privacy_results, flush=True)
+            # Compute privacy guarantees
+            epsilon, delta = compute_epsilon(
+                noise_multiplier=noise_std,
+                sample_rate=subsampling_ratio,
+                steps=t + 1,
+                target_delta=target_delta,
+                accountant=accountant,
+            )
+            privacy_results = {"accountant": accountant, "epsilon": epsilon, "delta": delta}
+            print(privacy_results, flush=True)
 
         previous_params = params
         previous_noisy_grad = noisy_grad
