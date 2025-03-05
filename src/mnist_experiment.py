@@ -143,7 +143,7 @@ def main(argv):
     num_classes = 10
     image_dimension = 32
     physical_batch_size = FLAGS.train_device_batch_size
-    clipping_norm = 1.0
+    clipping_norm = FLAGS.clipping_norm
     accountant = 'pld'
     kappa = 0.7
     gamma = 0.2
@@ -187,11 +187,14 @@ def main(argv):
     previous_params = jax.tree_util.tree_map(lambda x: x * 0, state.params)
     previous_noisy_grad = jax.tree_util.tree_map(lambda x: x * 0, state.params)
 
-    momentum_manual = None
-    variance_manual = None
+    momentum_manual, variance_manual = None, None
+    per_example_gradients1, per_example_gradients2 = None, None
     if FLAGS.experiment_name == 'momentum':
         momentum_manual = jax.tree_util.tree_map(lambda x: x * 0, state.params)
         variance_manual = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+    elif FLAGS.experiment_name == 'disk':
+        per_example_gradients1 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+        per_example_gradients2 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
 
     # Count and print the number of trainable parameters
     num_trainable_params = sum(param.size for param in jax.tree_util.tree_leaves(state.params))
@@ -255,23 +258,6 @@ def main(argv):
             )
         )
 
-        ########################
-
-        per_example_gradients1 = compute_per_example_look_ahead_gradients_physical_batch(state,
-                                                                                         previous_params,
-                                                                                         inner_product_test_batch_x,
-                                                                                         inner_product_test_batch_y,
-                                                                                         loss_fn,
-                                                                                         gamma)
-        per_example_gradients2 = compute_per_example_gradients_physical_batch(state,
-                                                                              inner_product_test_batch_x,
-                                                                              inner_product_test_batch_y,
-                                                                              loss_fn)
-
-        angle = tree_angle(per_example_gradients1, per_example_gradients2)
-
-        ########################
-
         noisy_grad = add_Gaussian_noise(noise_rng, accumulated_clipped_grads, noise_std, clipping_norm)
         if FLAGS.optimizer_name == 'disk':
             noisy_grad = jax.tree_util.tree_map(
@@ -293,13 +279,11 @@ def main(argv):
         logical_batch_sizes.append(actual_batch_size)
 
         if t % FLAGS.eval_every_n_steps == 0:
-            print(f'\n current angle (in degrees): {float(math.degrees(float(angle))):8.3f}', flush=True)
-
             acc_iter = model_evaluation(
                 state, test_images, test_labels, batch_size=num_classes, orig_image_dimension=image_dimension,
                 use_gpu=FLAGS.use_gpu
             )
-            print(f"throughput at iteration {t:8}: {actual_batch_size / duration:.2f} samp/s, accuracy at iteration {t:8}: {100*acc_iter:5.2f}%", flush=True)
+            print(f"\n Throughput at iteration {t:8}: {actual_batch_size / duration:.2f} samp/s, accuracy at iteration {t:8}: {100*acc_iter:5.2f}%", flush=True)
 
             # Compute privacy guarantees
             epsilon, delta = compute_epsilon(
@@ -326,9 +310,27 @@ def main(argv):
                 diff_norm1 = tree_norm(jax.tree_util.tree_map(lambda x, y: x - y, accumulated_clipped_grads, momentum_manual))
                 diff_norm2 = tree_norm(jax.tree_util.tree_map(lambda x, y: x - y, accumulated_clipped_grads, pred))
                 print(f"grad_norm: {grad_norm:8.3f}/{grad_norm_noisy:8.3f}, diff_norm1: {diff_norm1:8.3f}, diff_norm2: {diff_norm2:8.3f}", flush=True)
+            elif FLAGS.experiment_name == 'disk':
+
+                pg1 = jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0), per_example_gradients1)
+                pg2 = jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0), per_example_gradients2)
+
+                angle_between = tree_angle(pg1, pg2)
+                angle1 = tree_angle(pg1, accumulated_clipped_grads)
+                angle2 = tree_angle(pg2, accumulated_clipped_grads)
+
+                print(f"Angle between: {angle_between:8.3f}, angle1: {angle1:8.3f}, angle2: {angle2:8.3f}", flush=True)
+
 
         previous_params = params
         previous_noisy_grad = noisy_grad
+
+        if FLAGS.experiment_name == 'disk':
+            # Run at the end of the for-loop for the next iteration
+            per_example_gradients1 = compute_per_example_look_ahead_gradients_physical_batch(
+                state, previous_params, inner_product_test_batch_x, inner_product_test_batch_y, loss_fn, gamma)
+            per_example_gradients2 = compute_per_example_gradients_physical_batch(
+                state, inner_product_test_batch_x, inner_product_test_batch_y, loss_fn)
 
 
 if __name__ == '__main__':
