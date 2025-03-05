@@ -16,6 +16,7 @@ def create_train_state(
 
     if layers_to_freeze is None:
         tx = optax.adam(optimizer_config.learning_rate)
+        # tx = optax.adagrad(learning_rate=optimizer_config.learning_rate)
     else:
         # https://flax.readthedocs.io/en/v0.6.11/guides/transfer_learning.html
         params = freeze(params)
