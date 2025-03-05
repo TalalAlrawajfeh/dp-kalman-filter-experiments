@@ -54,22 +54,29 @@ def load_model(rng, model_name, dimension, num_classes):
             def __call__(self, x):
                 x = nn.Conv(features=16, kernel_size=(3, 3), strides=(1, 1), padding='SAME')(x)
                 # x = nn.BatchNorm()(x)
-                x = nn.leaky_relu(x, 0.05)
+                # x = nn.leaky_relu(x, 0.05)
+                x = nn.GroupNorm(num_groups=4)(x)
+                x = nn.activation.selu(x)
                 x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2))
 
                 x = nn.Conv(features=32, kernel_size=(3, 3), strides=(1, 1), padding='SAME')(x)
                 # x = nn.BatchNorm()(x)
-                x = nn.leaky_relu(x, 0.05)
+                # x = nn.leaky_relu(x, 0.05)
+                x = nn.GroupNorm(num_groups=4)(x)
+                x = nn.activation.selu(x)
                 x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2))
 
                 x = nn.Conv(features=64, kernel_size=(3, 3), strides=(1, 1), padding='SAME')(x)
                 # x = nn.BatchNorm()(x)
-                x = nn.leaky_relu(x, 0.05)
+                # x = nn.leaky_relu(x, 0.05)
+                x = nn.GroupNorm(num_groups=4)(x)
+                x = nn.activation.selu(x)
                 x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2))
 
                 x = x.reshape((x.shape[0], -1))
                 x = nn.Dense(features=128)(x)
-                x = nn.leaky_relu(x, 0.05)
+                # x = nn.leaky_relu(x, 0.05)
+                x = nn.activation.selu(x)
                 x = nn.Dense(features=num_classes)(x)
                 return (x,)
 

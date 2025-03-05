@@ -315,14 +315,12 @@ def main(argv):
                         masks,
                         1000000.0))
                 clean_grads = jax.tree_util.tree_map(lambda x: x / actual_batch_size, clean_grads)
-                norm_clean_grads = tree_norm(clean_grads)
 
-                count = sum(jnp.sum(2 * jnp.square(param) > var)
-                    for param, var in zip(jax.tree_util.tree_leaves(adam_mom1), jax.tree_util.tree_leaves(adam_mom2)))
+                count = sum(jnp.sum(2 * jnp.square(param) > var) for param, var in zip(jax.tree_util.tree_leaves(adam_mom1), jax.tree_util.tree_leaves(adam_mom2)))
                 print(f"Number of parameters where SNR > 1.: {100 * count / num_trainable_params:.2f}%")
-                count = sum(jnp.sum(2 * jnp.square(param) > .1 * var)
-                    for param, var in zip(jax.tree_util.tree_leaves(adam_mom1), jax.tree_util.tree_leaves(adam_mom2)))
+                count = sum(jnp.sum(2 * jnp.square(param) > .1 * var) for param, var in zip(jax.tree_util.tree_leaves(adam_mom1), jax.tree_util.tree_leaves(adam_mom2)))
                 print(f"Number of parameters where SNR > .1: {100 * count / num_trainable_params:.2f}%")
+                
                 norm_adam1 = tree_norm(adam_mom1)
                 adam1_rescaled = jax.tree_util.tree_map(lambda x: x / norm_adam1, adam_mom1)
                 norm_adam1_noisy = tree_norm(adam_mom1noisy)
