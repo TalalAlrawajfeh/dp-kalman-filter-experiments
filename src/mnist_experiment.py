@@ -24,9 +24,10 @@ from jaxdpopt.dp_accounting_utils import calculate_noise
 
 USE_GPU = False
 
-
+flags.DEFINE_float('clipping_norm', 0.1, 'Clipping norm for the per-sample gradients.')
 flags.DEFINE_integer('eval_every_n_steps', 100, 'How often to run eval.')
 flags.DEFINE_string('experiment_name', '', 'Experiment name')
+flags.DEFINE_integer('num_steps', 10000, 'Number of training steps.')
 flags.DEFINE_string('optimizer_name', 'disk', 'Name of the optimizer')
 flags.DEFINE_integer('rnd_seed', None,
                      'Initial random seed, if not specified then OS source of entropy will be used.')
@@ -49,7 +50,7 @@ def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
         # slice
         physical_batch_size = FLAGS.train_device_batch_size
         image_dimension = 32
-        clipping_norm = 1
+        clipping_norm = FLAGS.clipping_norm
 
         start_idx = t * physical_batch_size
         pb = jax.lax.dynamic_slice(
@@ -138,7 +139,6 @@ def main(argv):
 
     target_delta = 1e-6
     target_epsilon = 1.0
-    num_steps = 10000
     logical_bs = FLAGS.train_device_batch_size
     num_classes = 10
     image_dimension = 32
@@ -165,7 +165,7 @@ def main(argv):
         sample_rate=subsampling_ratio,
         target_epsilon=target_epsilon,
         target_delta=target_delta,
-        steps=num_steps,
+        steps=FLAGS.num_steps,
         accountant='pld',
     )
 
@@ -200,7 +200,7 @@ def main(argv):
     inner_product_test_batch_x = test_images[:128].reshape(-1, 1, 32, 32, 3)
     inner_product_test_batch_y = test_labels[:128]
 
-    for t in range(num_steps):
+    for t in range(FLAGS.num_steps):
         sampling_rng = jax.random.key(t + 1)
         batch_rng, binomial_rng, noise_rng = jax.random.split(sampling_rng, 3)
 
@@ -280,8 +280,8 @@ def main(argv):
         # TODO: @talal, should the noisy_grad be normalized by the actual_batch_size?
         if FLAGS.use_gpu:
             actual_batch_size = jax.device_put(actual_batch_size, jax.devices("gpu")[0])
-        # noisy_grad = jax.tree_util.tree_map(lambda x: x / actual_batch_size, noisy_grad)
-        # accumulated_clipped_grads = jax.tree_util.tree_map(lambda x: x / actual_batch_size, accumulated_clipped_grads)
+        noisy_grad = jax.tree_util.tree_map(lambda x: x / actual_batch_size, noisy_grad)
+        accumulated_clipped_grads = jax.tree_util.tree_map(lambda x: x / actual_batch_size, accumulated_clipped_grads)
 
         # update
         state = jax.block_until_ready(update_model(state, noisy_grad))
@@ -322,9 +322,10 @@ def main(argv):
                 pred = jax.tree_util.tree_map(lambda x, y: x * (jnp.abs(x) > 0.5 * jnp.sqrt(y)), momentum_manual, variance_manual)
 
                 grad_norm = tree_norm(accumulated_clipped_grads)
+                grad_norm_noisy = tree_norm(noisy_grad)
                 diff_norm1 = tree_norm(jax.tree_util.tree_map(lambda x, y: x - y, accumulated_clipped_grads, momentum_manual))
                 diff_norm2 = tree_norm(jax.tree_util.tree_map(lambda x, y: x - y, accumulated_clipped_grads, pred))
-                print(f"grad_norm: {grad_norm:8.3f}, diff_norm1: {diff_norm1:8.3f}, diff_norm2: {diff_norm2:8.3f}", flush=True)
+                print(f"grad_norm: {grad_norm:8.3f}/{grad_norm_noisy:8.3f}, diff_norm1: {diff_norm1:8.3f}, diff_norm2: {diff_norm2:8.3f}", flush=True)
 
         previous_params = params
         previous_noisy_grad = noisy_grad
