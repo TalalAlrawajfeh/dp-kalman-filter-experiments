@@ -63,12 +63,8 @@ def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
 
         # compute grads and clip
         if FLAGS.optimizer_name == 'disk':
-            per_example_gradients1 = compute_per_example_look_ahead_gradients_physical_batch(state,
-                                                                                             previous_params,
-                                                                                             pb,
-                                                                                             yb,
-                                                                                             loss_fn,
-                                                                                             gamma)
+            per_example_gradients1 = compute_per_example_look_ahead_gradients_physical_batch(
+                state, previous_params, pb, yb, loss_fn, gamma)
             per_example_gradients2 = compute_per_example_gradients_physical_batch(state, pb, yb, loss_fn)
             alpha = (1 - kappa) / (kappa * gamma)
             per_example_gradients = jax.tree_util.tree_map(lambda g1, g2: alpha * g1 + (1 - alpha) * g2,
@@ -189,17 +185,14 @@ def main(argv):
     previous_params = jax.tree_util.tree_map(lambda x: x * 0, state.params)
     previous_noisy_grad = jax.tree_util.tree_map(lambda x: x * 0, state.params)
 
-    adam_mom1, adam_mom2 = None, None
-    adam_mom1noisy, adam_mom2noisy = None, None
-    per_example_gradients1, per_example_gradients2 = None, None
     clean_grads = None
-    if FLAGS.experiment_name == 'momentum':
-        adam_mom1 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
-        adam_mom2 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
-        adam_mom1noisy = jax.tree_util.tree_map(lambda x: x * 0, state.params)
-        adam_mom2noisy = jax.tree_util.tree_map(lambda x: x * 0, state.params)
-        clean_grads = jax.tree_util.tree_map(lambda x: x * 0, state.params)
-    elif FLAGS.experiment_name == 'disk':
+    adam_mom1 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+    adam_mom2 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+    adam_mom1noisy = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+    adam_mom2noisy = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+    clean_grads = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+
+    if FLAGS.experiment_name == 'disk':
         per_example_gradients1 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
         per_example_gradients2 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
 
@@ -257,6 +250,8 @@ def main(argv):
 
         # pred_grad = pred1
         pred_grad = pred1_noisy
+        if FLAGS.optimizer_name == 'disk':
+            pred_grad = jax.tree_util.tree_map(lambda x: x * 0.0, pred_grad)
 
         # Main loop
         _, _, corrections_unnoisy, *_ = jax.lax.fori_loop(
@@ -277,15 +272,16 @@ def main(argv):
             actual_batch_size = jax.device_put(actual_batch_size, jax.devices("gpu")[0])
 
         corrections_noisy = add_Gaussian_noise(noise_rng, corrections_unnoisy, noise_std, clipping_norm)
+        noisy_grad = jax.tree_util.tree_map(lambda x, y: x + y / actual_batch_size, pred_grad, corrections_noisy)
         if FLAGS.optimizer_name == 'disk':
             noisy_grad = jax.tree_util.tree_map(
                 lambda g1, g2: (1 - kappa) * g1 + kappa * g2, previous_noisy_grad, noisy_grad)
 
-        noisy_grad = jax.tree_util.tree_map(lambda x, y: x + y / actual_batch_size, pred_grad, corrections_noisy)
         accumulated_clipped_grads = jax.tree_util.tree_map(lambda x, y: x + y / actual_batch_size, pred_grad, corrections_unnoisy)
 
         # update
         state = jax.block_until_ready(update_model(state, noisy_grad))
+
 
         end = time.time()
         duration = end - start
@@ -355,16 +351,21 @@ def main(argv):
                 print(f"grad_norm: {norm_adam_pred:8.3f}, diff_norm1: {diff_norm1_noisy:8.4f}, diff_norm2: {diff_norm2_noisy:8.4f}, diff_norm3: {diff_norm3_noisy:8.4f}, angle: {angle1_noisy:8.2f}, mom1 norm {norm_adam1_noisy:8.3f}", flush=True)
                 # print(f"grad_norm: {grad_norm:8.2f}, shortcut/public: {diff_norm2:7.2f}/{diff_norm2_noisy:8.2f}, angle: {angle1:8.2f}", flush=True)
 
-            elif FLAGS.experiment_name == 'disk':
+            elif FLAGS.experiment_name == 'disk' and (t > 1):
                 pg1 = jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0), per_example_gradients1)
                 pg2 = jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0), per_example_gradients2)
-
                 angle_between = tree_angle(pg1, pg2)
+
+                # for param in jax.tree_util.tree_leaves(pg1):
+                #     print(f"Param shape: {param.shape}")
+                # print("="*30)
+                # for param in jax.tree_util.tree_leaves(accumulated_clipped_grads):
+                #     print(f"Param shape: {param.shape}")
+
                 angle1 = tree_angle(pg1, accumulated_clipped_grads)
                 angle2 = tree_angle(pg2, accumulated_clipped_grads)
 
                 print(f"Angle between: {angle_between:8.3f}, angle1: {angle1:8.3f}, angle2: {angle2:8.3f}", flush=True)
-
 
         previous_params = params
         previous_noisy_grad = noisy_grad
@@ -376,13 +377,11 @@ def main(argv):
             per_example_gradients2 = compute_per_example_gradients_physical_batch(
                 state, inner_product_test_batch_x, inner_product_test_batch_y, loss_fn)
 
-        if FLAGS.experiment_name == 'momentum':
-            beta1, beta2 = 0.7, 0.9
-
-            adam_mom1 = jax.tree_util.tree_map(lambda x, y: beta1 * x + (1-beta1) * y, adam_mom1, accumulated_clipped_grads)
-            adam_mom2 = jax.tree_util.tree_map(lambda x, y: beta2 * x + (1-beta2) * jnp.square(y), adam_mom2, accumulated_clipped_grads)
-            adam_mom1noisy = jax.tree_util.tree_map(lambda x, y: beta1 * x + (1.-beta1) * y, adam_mom1noisy, noisy_grad)
-            adam_mom2noisy = jax.tree_util.tree_map(lambda x, y: beta2 * x + (1.-beta2) * jnp.square(y), adam_mom2noisy, noisy_grad)
+        beta1, beta2 = 0.9, 0.999
+        adam_mom1 = jax.tree_util.tree_map(lambda x, y: beta1 * x + (1-beta1) * y, adam_mom1, accumulated_clipped_grads)
+        adam_mom2 = jax.tree_util.tree_map(lambda x, y: beta2 * x + (1-beta2) * jnp.square(y), adam_mom2, accumulated_clipped_grads)
+        adam_mom1noisy = jax.tree_util.tree_map(lambda x, y: beta1 * x + (1.-beta1) * y, adam_mom1noisy, noisy_grad)
+        adam_mom2noisy = jax.tree_util.tree_map(lambda x, y: beta2 * x + (1.-beta2) * jnp.square(y), adam_mom2noisy, noisy_grad)
 
 
 if __name__ == '__main__':
