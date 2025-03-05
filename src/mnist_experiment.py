@@ -187,11 +187,14 @@ def main(argv):
     previous_params = jax.tree_util.tree_map(lambda x: x * 0, state.params)
     previous_noisy_grad = jax.tree_util.tree_map(lambda x: x * 0, state.params)
 
-    momentum_manual, variance_manual = None, None
+    adam_mom1, adam_mom2 = None, None
+    adam_mom1noisy, adam_mom2noisy = None, None
     per_example_gradients1, per_example_gradients2 = None, None
     if FLAGS.experiment_name == 'momentum':
-        momentum_manual = jax.tree_util.tree_map(lambda x: x * 0, state.params)
-        variance_manual = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+        adam_mom1 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+        adam_mom2 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+        adam_mom1noisy = jax.tree_util.tree_map(lambda x: x * 0, state.params)
+        adam_mom2noisy = jax.tree_util.tree_map(lambda x: x * 0, state.params)
     elif FLAGS.experiment_name == 'disk':
         per_example_gradients1 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
         per_example_gradients2 = jax.tree_util.tree_map(lambda x: x * 0, state.params)
@@ -297,21 +300,21 @@ def main(argv):
             print(privacy_results, flush=True)
 
             if FLAGS.experiment_name == 'momentum':
-                momentum_manual = jax.tree_util.tree_map(lambda x, y: 0.7 * x + 0.3 * y, momentum_manual, accumulated_clipped_grads)
-                variance_manual = jax.tree_util.tree_map(lambda x, y: 0.7 * x + 0.3 * jnp.square(y), variance_manual, accumulated_clipped_grads)
-                count = sum(jnp.sum(jnp.abs(param) > (0.5*jnp.sqrt(var)))
-                    for param, var in zip(jax.tree_util.tree_leaves(momentum_manual), jax.tree_util.tree_leaves(variance_manual)))
-                print(f"Number of parameters where the absolute mean is larger than the square root of the variance: {100 * count / num_trainable_params:.2f}%")
+                count = sum(jnp.sum(2 * jnp.square(param) > var)
+                    for param, var in zip(jax.tree_util.tree_leaves(adam_mom1), jax.tree_util.tree_leaves(adam_mom2)))
+                print(f"Number of parameters where SNR > 1.: {100 * count / num_trainable_params:.2f}%")
+                count = sum(jnp.sum(2 * jnp.square(param) > .1 * var)
+                    for param, var in zip(jax.tree_util.tree_leaves(adam_mom1), jax.tree_util.tree_leaves(adam_mom2)))
+                print(f"Number of parameters where SNR > .1: {100 * count / num_trainable_params:.2f}%")
 
-                pred = jax.tree_util.tree_map(lambda x, y: x * (jnp.abs(x) > 0.5 * jnp.sqrt(y)), momentum_manual, variance_manual)
+                pred = jax.tree_util.tree_map(lambda x, y: x * (2 * jnp.square(x) > 0.1 * y), adam_mom1, adam_mom2)
 
                 grad_norm = tree_norm(accumulated_clipped_grads)
                 grad_norm_noisy = tree_norm(noisy_grad)
-                diff_norm1 = tree_norm(jax.tree_util.tree_map(lambda x, y: x - y, accumulated_clipped_grads, momentum_manual))
+                diff_norm1 = tree_norm(jax.tree_util.tree_map(lambda x, y: x - y, accumulated_clipped_grads, adam_mom1))
                 diff_norm2 = tree_norm(jax.tree_util.tree_map(lambda x, y: x - y, accumulated_clipped_grads, pred))
                 print(f"grad_norm: {grad_norm:8.3f}/{grad_norm_noisy:8.3f}, diff_norm1: {diff_norm1:8.3f}, diff_norm2: {diff_norm2:8.3f}", flush=True)
             elif FLAGS.experiment_name == 'disk':
-
                 pg1 = jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0), per_example_gradients1)
                 pg2 = jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0), per_example_gradients2)
 
@@ -331,6 +334,13 @@ def main(argv):
                 state, previous_params, inner_product_test_batch_x, inner_product_test_batch_y, loss_fn, gamma)
             per_example_gradients2 = compute_per_example_gradients_physical_batch(
                 state, inner_product_test_batch_x, inner_product_test_batch_y, loss_fn)
+
+            beta1, beta2 = 0.9, 0.999
+
+            adam_mom1 = jax.tree_util.tree_map(lambda x, y: beta1 * x + (1-beta1) * y, adam_mom1, accumulated_clipped_grads)
+            adam_mom2 = jax.tree_util.tree_map(lambda x, y: beta2 * x + (1-beta2) * jnp.square(y), adam_mom2, accumulated_clipped_grads)
+            adam_mom1noisy = jax.tree_util.tree_map(lambda x, y: beta1 * x + (1.-beta1) * y, adam_mom1noisy, noisy_grad)
+            adam_mom2noisy = jax.tree_util.tree_map(lambda x, y: beta2 * x + (1.-beta2) * jnp.square(y), adam_mom2noisy, noisy_grad)
 
 
 if __name__ == '__main__':
