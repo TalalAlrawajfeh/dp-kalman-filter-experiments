@@ -72,8 +72,8 @@ def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
         else:
             per_example_gradients = compute_per_example_gradients_physical_batch(state, pb, yb, loss_fn)
 
-        error_pred = jax.tree_util.tree_map(lambda x, y: x - y, per_example_gradients, grad_pred)
-        clipped_grads_from_pb = clip_physical_batch(error_pred, clipping_norm)
+        correction = jax.tree_util.tree_map(lambda x, y: x - y, per_example_gradients, grad_pred)
+        clipped_grads_from_pb = clip_physical_batch(correction, clipping_norm)
         sum_of_clipped_grads_from_pb = accumulate_physical_batch(clipped_grads_from_pb, mask)
         accumulated_clipped_grads = add_trees(accumulated_clipped_grads, sum_of_clipped_grads_from_pb)
 
@@ -145,6 +145,7 @@ def main(argv):
     accountant = 'pld'
     kappa = 0.7
     gamma = 0.2
+    beta1, beta2 = 0.9, 0.999
 
     state = create_train_state(
         model_name="small",
@@ -243,10 +244,13 @@ def main(argv):
 
         start = time.time()
 
+        bias_correction = 1 - beta1 ** (t + 1)
+        adam1 = jax.tree_util.tree_map(lambda x: x / bias_correction, adam_mom1)
+        adam1_noisy = jax.tree_util.tree_map(lambda x: x / bias_correction, adam_mom1noisy)
         norm_adam1 = tree_norm(adam_mom1)
-        pred1 = jax.tree_util.tree_map(lambda x: x / (norm_adam1 + 1e-9), adam_mom1)
+        pred1 = jax.tree_util.tree_map(lambda x: x / (norm_adam1 + 1e-9), adam1)
         norm_adam1_noisy = tree_norm(adam_mom1noisy)
-        pred1_noisy = jax.tree_util.tree_map(lambda x: x / (norm_adam1_noisy+1e-9), adam_mom1noisy)
+        pred1_noisy = jax.tree_util.tree_map(lambda x: x / (norm_adam1_noisy+1e-9), adam1_noisy)
 
         # pred_grad = pred1
         pred_grad = pred1_noisy
@@ -377,7 +381,6 @@ def main(argv):
             per_example_gradients2 = compute_per_example_gradients_physical_batch(
                 state, inner_product_test_batch_x, inner_product_test_batch_y, loss_fn)
 
-        beta1, beta2 = 0.9, 0.999
         adam_mom1 = jax.tree_util.tree_map(lambda x, y: beta1 * x + (1-beta1) * y, adam_mom1, accumulated_clipped_grads)
         adam_mom2 = jax.tree_util.tree_map(lambda x, y: beta2 * x + (1-beta2) * jnp.square(y), adam_mom2, accumulated_clipped_grads)
         adam_mom1noisy = jax.tree_util.tree_map(lambda x, y: beta1 * x + (1.-beta1) * y, adam_mom1noisy, noisy_grad)
