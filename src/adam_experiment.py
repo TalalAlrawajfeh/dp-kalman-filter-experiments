@@ -169,7 +169,7 @@ def main(argv):
     gamma = 0.2
 
     state = create_train_state(
-        model_name="small",
+        model_name="disk_cnn",
         num_classes=num_classes,
         image_dimension=image_dimension,
         optimizer_config=optimizer_config,

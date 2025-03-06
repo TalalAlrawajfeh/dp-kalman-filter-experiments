@@ -79,6 +79,37 @@ def load_model(rng, model_name, dimension, num_classes):
                 x = nn.activation.selu(x)
                 x = nn.Dense(features=num_classes)(x)
                 return (x,)
+    elif model_name == 'disk_cnn':
+        class CNN(nn.Module):
+            """CNN taken from the DiSK paper"""
+
+            @nn.compact
+            def __call__(self, x):
+                x = nn.Conv(features=32, kernel_size=(3, 3), strides=(1, 1), padding='SAME')(x)
+                x = nn.activation.tanh(x)
+                x = nn.max_pool(x, window_shape=(2, 2), strides=(2, 2))
+                x = nn.GroupNorm(num_groups=16)(x)
+
+                x = nn.Conv(features=64, kernel_size=(3, 3), strides=(1, 1), padding='SAME')(x)
+                x = nn.activation.tanh(x)
+                x = nn.max_pool(x, window_shape=(2, 2), strides=(2, 2))
+                x = nn.GroupNorm(num_groups=16)(x)
+
+                x = nn.Conv(features=128, kernel_size=(3, 3), strides=(1, 1), padding='SAME')(x)
+                x = nn.activation.tanh(x)
+                x = nn.max_pool(x, window_shape=(2, 2), strides=(2, 2))
+                x = nn.GroupNorm(num_groups=16)(x)
+
+                x = nn.Conv(features=256, kernel_size=(3, 3), strides=(1, 1), padding='SAME')(x)
+                x = nn.activation.tanh(x)
+                x = nn.GroupNorm(num_groups=16)(x)
+
+                x = nn.Conv(features=100, kernel_size=(3, 3), strides=(1, 1), padding='SAME')(x)
+                x = nn.avg_pool(x, window_shape=(4, 4), strides=(4, 4))
+
+                x = x.reshape((x.shape[0], -1))
+                x = nn.Dense(features=num_classes)(x)
+                return (x,)
 
         model = CNN()
         input_shape = (1, dimension, dimension, 3)
