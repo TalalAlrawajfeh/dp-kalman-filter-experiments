@@ -42,6 +42,8 @@ def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
             state,
             previous_params,
             accumulated_clipped_grads,
+            accumulated_gradnorm,
+            accumulated_corrnorm,
             logical_batch_X,
             logical_batch_y,
             masks,
@@ -79,10 +81,22 @@ def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
         sum_of_clipped_grads_from_pb = accumulate_physical_batch(clipped_grads_from_pb, mask)
         accumulated_clipped_grads = add_trees(accumulated_clipped_grads, sum_of_clipped_grads_from_pb)
 
+        # tree_flatten returns a list of arrays that are of size batchsize
+        # after jnp.array(free_flatten()) will be a matrix of size [num_leaves, batchsize]
+        px_per_param_sq_norms = jax.tree.map(lambda x: jnp.linalg.norm(x.reshape(x.shape[0], -1), axis=-1) ** 2, per_example_gradients)
+        px_grad_norms = jnp.sqrt(jnp.sum(jnp.array(jax.tree_util.tree_flatten(px_per_param_sq_norms)[0]), axis=0))
+        gradnorm = jnp.dot(px_grad_norms, mask)
+
+        px_per_param_sq_norms = jax.tree.map(lambda x: jnp.linalg.norm(x.reshape(x.shape[0], -1), axis=-1) ** 2, correction)
+        px_grad_norms = jnp.sqrt(jnp.sum(jnp.array(jax.tree_util.tree_flatten(px_per_param_sq_norms)[0]), axis=0))
+        corrnorm = jnp.dot(px_grad_norms, mask)
+
         return (
             state,
             previous_params,
             accumulated_clipped_grads,
+            accumulated_gradnorm + gradnorm,
+            accumulated_corrnorm + corrnorm,
             logical_batch_X,
             logical_batch_y,
             masks,
@@ -243,16 +257,19 @@ def main(argv):
         params = state.params
 
         accumulate_clip_corrections0 = jax.tree.map(lambda x: 0.0 * x, params)
+        accumulate_gradnorm0 = jax.device_put(0.0, jax.devices("gpu")[0])
+        accumulate_corrnorm0 = jax.device_put(0.0, jax.devices("gpu")[0])
 
         start = time.time()
 
         bias_correction = 1 - beta1 ** (t + 1)
-        adam1 = jax.tree_util.tree_map(lambda x: x / bias_correction, adam_mom1)
-        adam1_noisy = jax.tree_util.tree_map(lambda x: x / bias_correction, adam_mom1noisy)
-        norm_adam1 = tree_norm(adam_mom1)
-        pred1 = jax.tree_util.tree_map(lambda x: x / (norm_adam1 + 1e-9), adam1)
+        adam1bc = jax.tree_util.tree_map(lambda x: x / bias_correction, adam_mom1)
+        adam1bc_noisy = jax.tree_util.tree_map(lambda x: x / bias_correction, adam_mom1noisy)
+
+        norm_adam1 = tree_norm(adam1bc)
+        pred1 = jax.tree_util.tree_map(lambda x: x / (norm_adam1 + 1e-9), adam1bc)
         norm_adam1_noisy = tree_norm(adam_mom1noisy)
-        pred1_noisy = jax.tree_util.tree_map(lambda x: x / (norm_adam1_noisy+1e-9), adam1_noisy)
+        pred1_noisy = jax.tree_util.tree_map(lambda x: x / (norm_adam1_noisy+1e-9), adam1bc_noisy)
 
         # pred_grad = pred1
         pred_grad = pred1_noisy
@@ -260,7 +277,7 @@ def main(argv):
             pred_grad = jax.tree_util.tree_map(lambda x: x * 0.0, pred_grad)
 
         # Main loop
-        _, _, corrections_unnoisy, *_ = jax.lax.fori_loop(
+        _, _, corrections_unnoisy, gradnorm, corrnorm, *_ = jax.lax.fori_loop(
             0,
             n_physical_batches,
             process_physical_batch_fn,
@@ -268,6 +285,8 @@ def main(argv):
                 state,
                 previous_params,
                 accumulate_clip_corrections0,
+                accumulate_gradnorm0,
+                accumulate_corrnorm0,
                 padded_logical_batch_X,
                 padded_logical_batch_y,
                 masks,
@@ -285,9 +304,12 @@ def main(argv):
 
         accumulated_clipped_grads = jax.tree_util.tree_map(lambda x, y: x + y / actual_batch_size, pred_grad, corrections_unnoisy)
 
+        gradnorm = gradnorm / actual_batch_size
+        corrnorm = corrnorm / actual_batch_size
+        prednorm = tree_norm(pred_grad)
+
         # update
         state = jax.block_until_ready(update_model(state, noisy_grad))
-
 
         end = time.time()
         duration = end - start
@@ -301,6 +323,7 @@ def main(argv):
                 use_gpu=FLAGS.use_gpu
             )
             print(f"\n Throughput at iteration {t:8}: {actual_batch_size / duration:.2f} samp/s, accuracy at iteration {t:8}: {100*acc_iter:5.2f}%", flush=True)
+            print(f"Gradient norm: {gradnorm:8.3f}, Correction norm: {corrnorm:8.3f}, Prediction norm: {prednorm:8.3f}", flush=True)
 
             # Compute privacy guarantees
             epsilon, delta = compute_epsilon(
@@ -316,6 +339,8 @@ def main(argv):
             if FLAGS.experiment_name == 'momentum':
                 # Rerun main loop without clipping
                 accumulate_clip_corrections0 = jax.tree.map(lambda x: 0.0 * x, params)
+                accumulate_gradnorm0 = jax.device_put(0.0, jax.devices("gpu")[0])
+                accumulate_corrnorm0 = jax.device_put(0.0, jax.devices("gpu")[0])
                 _, _, clean_corrections, *_ = jax.lax.fori_loop(
                     0,
                     n_physical_batches,
@@ -324,6 +349,8 @@ def main(argv):
                         state,
                         previous_params,
                         accumulate_clip_corrections0,
+                        accumulate_gradnorm0,
+                        accumulate_corrnorm0,
                         padded_logical_batch_X,
                         padded_logical_batch_y,
                         masks,
@@ -367,7 +394,6 @@ def main(argv):
                 # print("="*30)
                 # for param in jax.tree_util.tree_leaves(accumulated_clipped_grads):
                 #     print(f"Param shape: {param.shape}")
-
                 angle1 = tree_angle(pg1, accumulated_clipped_grads)
                 angle2 = tree_angle(pg2, accumulated_clipped_grads)
 
