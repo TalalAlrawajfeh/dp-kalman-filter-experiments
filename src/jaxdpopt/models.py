@@ -110,18 +110,20 @@ def load_model(rng, model_name, dimension, num_classes):
                 x = x.reshape((x.shape[0], -1))
                 x = nn.Dense(features=num_classes)(x)
                 return (x,)
+    else:
+        raise ValueError(f"Model name not recognized {model_name}")
 
-        model = CNN()
-        input_shape = (1, dimension, dimension, 3)
-        # But then, we need to split it in order to get random numbers
+    model = CNN()
+    input_shape = (1, dimension, dimension, 3)
+    # But then, we need to split it in order to get random numbers
 
-        # The init function needs an example of the correct dimensions, to infer the dimensions.
-        # They are not explicitly writen in the module, instead, the model infer them with the first example.
-        x = jax.random.normal(params_key, input_shape)
+    # The init function needs an example of the correct dimensions, to infer the dimensions.
+    # They are not explicitly writen in the module, instead, the model infer them with the first example.
+    x = jax.random.normal(params_key, input_shape)
 
-        main_rng, init_rng, dropout_init_rng = jax.random.split(main_key, 3)
-        # Initialize the model
-        variables = model.init({"params": init_rng}, x)
-        # variables = model.init({'params':main_key}, batch)
-        model.apply(variables, x)
-        return main_rng, model, variables["params"], False
+    main_rng, init_rng, dropout_init_rng = jax.random.split(main_key, 3)
+    # Initialize the model
+    variables = model.init({"params": init_rng}, x)
+    # variables = model.init({'params':main_key}, batch)
+    model.apply(variables, x)
+    return main_rng, model, variables["params"], False
