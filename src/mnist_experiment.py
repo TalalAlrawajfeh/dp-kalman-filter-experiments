@@ -69,8 +69,10 @@ def process_physical_batch_factory(loss_fn, kappa=0.0, gamma=0.0):
             alpha = (1 - kappa) / (kappa * gamma)
             per_example_gradients = jax.tree_util.tree_map(lambda g1, g2: alpha * g1 + (1 - alpha) * g2,
                                                            per_example_gradients1, per_example_gradients2)
-        else:
+        elif FLAGS.optimizer_name in ['momentum', 'adam']:
             per_example_gradients = compute_per_example_gradients_physical_batch(state, pb, yb, loss_fn)
+        else:
+            assert False, f'Unknown optimizer name {FLAGS.optimizer_name}'
 
         correction = jax.tree_util.tree_map(lambda x, y: x - y, per_example_gradients, grad_pred)
         clipped_grads_from_pb = clip_physical_batch(correction, clipping_norm)
@@ -120,9 +122,9 @@ def main(argv):
     print('Initial random seed %d', rnd_seed)
 
     # Some assertions on the flags
-    assert FLAGS.optimizer_name in ['disk', 'momentum'], f'Unknown optimizer name {FLAGS.optimizer_name}'
+    assert FLAGS.optimizer_name in ['disk', 'momentum', 'adam'], f'Unknown optimizer name {FLAGS.optimizer_name}'
     if len(FLAGS.experiment_name) > 0:
-        assert FLAGS.experiment_name in ['disk', 'momentum'], f'Unknown experiment name {FLAGS.experiment_name}'
+        assert FLAGS.experiment_name in ['disk', 'momentum', 'adam'], f'Unknown experiment name {FLAGS.experiment_name}'
 
 
     (train_images, train_labels), (test_images, test_labels) = keras.datasets.cifar10.load_data()
@@ -254,7 +256,7 @@ def main(argv):
 
         # pred_grad = pred1
         pred_grad = pred1_noisy
-        if FLAGS.optimizer_name == 'disk':
+        if FLAGS.optimizer_name in ['disk', 'adam']:
             pred_grad = jax.tree_util.tree_map(lambda x: x * 0.0, pred_grad)
 
         # Main loop
