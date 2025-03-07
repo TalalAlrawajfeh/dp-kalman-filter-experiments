@@ -8,4 +8,5 @@ python3 src/mnist_experiment.py \
     --clipping_norm=1.0 \
     --train_device_batch_size=1024 \
     --experiment_name=momentum \
+    --model_name='small' \
     --optimizer_name=momentum | tee log/momentum_${datestring}_$RANDOM.txt

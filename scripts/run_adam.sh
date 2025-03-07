@@ -8,4 +8,5 @@ python3 src/mnist_experiment.py \
     --clipping_norm=1.0 \
     --train_device_batch_size=1024 \
     --experiment_name=adam \
+    --model_name='small' \
     --optimizer_name=adam | tee log/adam_${datestring}_$RANDOM.txt

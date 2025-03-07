@@ -8,4 +8,5 @@ python3 src/mnist_experiment.py \
     --clipping_norm=1.0 \
     --train_device_batch_size=1024 \
     --experiment_name=disk \
+    --model_name='small' \
     --optimizer_name=disk | tee log/disk_${datestring}_$RANDOM.txt

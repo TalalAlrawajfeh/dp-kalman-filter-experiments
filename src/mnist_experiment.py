@@ -27,6 +27,7 @@ USE_GPU = False
 flags.DEFINE_float('clipping_norm', 0.1, 'Clipping norm for the per-sample gradients.')
 flags.DEFINE_integer('eval_every_n_steps', 100, 'How often to run eval.')
 flags.DEFINE_string('experiment_name', '', 'Experiment name')
+flags.DEFINE_string('model_name', 'small', 'Name of the model')
 flags.DEFINE_integer('num_steps', 10000, 'Number of training steps.')
 flags.DEFINE_string('optimizer_name', 'disk', 'Name of the optimizer')
 flags.DEFINE_integer('rnd_seed', None, 'Initial random seed, if not specified then OS source of entropy will be used.')
@@ -164,7 +165,7 @@ def main(argv):
     beta1, beta2 = 0.9, 0.999
 
     state = create_train_state(
-        model_name="small",
+        model_name=FLAGS.model_name,
         num_classes=num_classes,
         image_dimension=image_dimension,
         optimizer_config=optimizer_config,
@@ -383,6 +384,15 @@ def main(argv):
                 print(f"grad_norm: {grad_norm:8.3f}, diff_norm1: {diff_norm1:8.4f}, diff_norm2: {diff_norm2:8.4f}, diff_norm3: {diff_norm3:8.4f}, angle: {angle1:8.2f}, mom1 norm {norm_adam_pred:8.3f}", flush=True)
                 print(f"grad_norm: {norm_adam_pred:8.3f}, diff_norm1: {diff_norm1_noisy:8.4f}, diff_norm2: {diff_norm2_noisy:8.4f}, diff_norm3: {diff_norm3_noisy:8.4f}, angle: {angle1_noisy:8.2f}, mom1 norm {norm_adam1_noisy:8.3f}", flush=True)
                 # print(f"grad_norm: {grad_norm:8.2f}, shortcut/public: {diff_norm2:7.2f}/{diff_norm2_noisy:8.2f}, angle: {angle1:8.2f}", flush=True)
+
+                per_example_gradients = compute_per_example_gradients_physical_batch(
+                    state, inner_product_test_batch_x, inner_product_test_batch_y, loss_fn)
+                per_ex_grad_clipped = clip_physical_batch(per_example_gradients, clipping_norm)
+                corr_ecg = jax.tree_util.tree_map(lambda x, y: x - y, per_ex_grad_clipped, pred_grad)
+                px_per_param_sq_norms = jax.tree.map(lambda x: jnp.linalg.norm(x.reshape(x.shape[0], -1), axis=-1) ** 2, corr_ecg)
+                px_grad_norms = jnp.sqrt(jnp.sum(jnp.array(jax.tree_util.tree_flatten(px_per_param_sq_norms)[0]), axis=0))
+                norm_ecg = jnp.dot(px_grad_norms, jnp.ones(128)) / 128
+                print(f"Norm of per-example clipped gradients: {norm_ecg:8.3f}", flush=True)
 
             elif FLAGS.experiment_name == 'disk' and (t > 1):
                 pg1 = jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0), per_example_gradients1)
